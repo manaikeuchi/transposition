@@ -1,8 +1,11 @@
+import io
+import re
 from pathlib import Path
 
 import cairosvg
-import img2pdf
 import verovio
+from pypdf import PdfReader
+from pypdf import PdfWriter
 
 VEROVIO_OPTIONS = {
     "pageWidth": 2100,
@@ -15,15 +18,19 @@ VEROVIO_OPTIONS = {
     "header": "none",
 }
 
-# Verovio's SVG glyphs rely on an author-set overflow="inherit" on <symbol>
-# to opt out of the SVG default symbol clip. Several PDF viewers don't
-# resolve that correctly and clip every glyph to its nominal glyph box
-# instead (seen as note/clef/etc. symbols showing only their bottom half,
-# while plain-path elements like staff lines and slurs render fine). Side-
-# step the whole vector-glyph compatibility question by rasterizing with
-# cairosvg (which does resolve it correctly) and embedding that as a
-# full-page image, rather than converting the SVG to PDF vectors directly.
-RASTER_SCALE = 4.0
+# Verovio emits each glyph as <symbol overflow="inherit">...<use .../>,
+# relying on that "inherit" to resolve to the document's visible default
+# and opt out of the SVG spec's implicit symbol clip. cairosvg doesn't
+# resolve that inheritance and clips every glyph to its nominal glyph box
+# instead, cutting off anything that extends past it — seen as noteheads,
+# clefs, and accidentals rendering as only their bottom half, while plain
+# path elements (staff lines, slurs, beams) were unaffected. Rewriting to
+# an explicit overflow="visible" fixes it.
+_OVERFLOW_INHERIT_RE = re.compile(r'overflow="inherit"')
+
+
+def _fix_symbol_clipping(svg: str) -> str:
+    return _OVERFLOW_INHERIT_RE.sub('overflow="visible"', svg)
 
 
 def render_score_to_pdf(musicxml_path: Path, pdf_path: Path) -> None:
@@ -33,16 +40,12 @@ def render_score_to_pdf(musicxml_path: Path, pdf_path: Path) -> None:
         raise RuntimeError("楽譜データのレンダリングに失敗しました")
 
     page_count = tk.getPageCount()
-    page_pngs = []
+    writer = PdfWriter()
     for page in range(1, page_count + 1):
-        svg = tk.renderToSVG(page)
-        page_pngs.append(
-            cairosvg.svg2png(
-                bytestring=svg.encode("utf-8"),
-                scale=RASTER_SCALE,
-                background_color="white",
-            )
-        )
+        svg = _fix_symbol_clipping(tk.renderToSVG(page))
+        page_pdf_bytes = cairosvg.svg2pdf(bytestring=svg.encode("utf-8"))
+        reader = PdfReader(io.BytesIO(page_pdf_bytes))
+        writer.add_page(reader.pages[0])
 
     with open(pdf_path, "wb") as f:
-        f.write(img2pdf.convert(page_pngs))
+        writer.write(f)

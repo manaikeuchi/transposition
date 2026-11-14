@@ -4,6 +4,5 @@ python-multipart==0.0.20
 music21==8.3.0
 verovio==4.3.1
 cairosvg==2.7.1
-img2pdf==0.6.3
 pypdf==5.9.0
 pillow==10.4.0
