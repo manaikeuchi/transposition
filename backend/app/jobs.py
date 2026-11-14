@@ -7,7 +7,9 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
+from typing import List
 from typing import Optional
 
 from app.config import DATA_DIR
@@ -17,6 +19,8 @@ from app.services import render
 from app.services import transpose
 from fastapi import UploadFile
 from music21 import stream
+from pypdf import PdfReader
+from pypdf import PdfWriter
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
@@ -33,7 +37,7 @@ class Job:
     job_id: str
     job_dir: Path
     status: str = "omr_processing"
-    musicxml_path: Optional[Path] = None
+    musicxml_paths: List[Path] = field(default_factory=list)
     output_pdf_path: Optional[Path] = None
     detected_key: Optional[str] = None
     part_count: Optional[int] = None
@@ -77,20 +81,23 @@ async def create_job(upload: UploadFile) -> Job:
 
 def _run_omr_stage(job: Job, input_path: Path) -> None:
     try:
-        mxl_path = omr.run_omr(input_path, job.job_dir)
-        score = transpose.load_score(mxl_path)
+        mxl_paths = omr.run_omr(input_path, job.job_dir)
+        scores = [transpose.load_score(p) for p in mxl_paths]
 
         try:
-            job.detected_key = str(transpose.analyze_key(score))
+            # The first page's key is taken as representative of the piece.
+            job.detected_key = str(transpose.analyze_key(scores[0]))
         except Exception:
             # Key estimation is best-effort (e.g. very short or atonal
             # excerpts can make music21's key-finder fail); it's only
             # informational, so don't fail the whole job over it.
             job.detected_key = None
 
-        job.musicxml_path = mxl_path
-        job.part_count = len(score.parts) if score.parts else 1
-        job.measure_count = len(score.parts[0].getElementsByClass("Measure")) if score.parts else None
+        job.musicxml_paths = mxl_paths
+        job.part_count = len(scores[0].parts) if scores[0].parts else 1
+        job.measure_count = sum(
+            len(s.parts[0].getElementsByClass("Measure")) if s.parts else 0 for s in scores
+        )
         job.status = "ready"
     except Exception as exc:  # noqa: BLE001
         job.status = "omr_failed"
@@ -130,6 +137,16 @@ def _export_musicxml(score: stream.Score, output_xml: Path) -> None:
     raise last_exc
 
 
+def _merge_pdfs(pdf_paths: List[Path], output_pdf: Path) -> None:
+    writer = PdfWriter()
+    for pdf_path in pdf_paths:
+        reader = PdfReader(str(pdf_path))
+        for page in reader.pages:
+            writer.add_page(page)
+    with open(output_pdf, "wb") as f:
+        writer.write(f)
+
+
 def _run_transpose_stage(
     job: Job,
     mode: str,
@@ -137,16 +154,25 @@ def _run_transpose_stage(
     target_key: Optional[str],
 ) -> None:
     try:
-        score = transpose.load_score(job.musicxml_path)
-        new_score, _applied = transpose.transpose_score(
-            score, mode=mode, semitones=semitones, target_key_name=target_key
-        )
+        page_pdfs = []
+        for i, mxl_path in enumerate(job.musicxml_paths):
+            score = transpose.load_score(mxl_path)
+            new_score, _applied = transpose.transpose_score(
+                score, mode=mode, semitones=semitones, target_key_name=target_key
+            )
 
-        output_xml = job.job_dir / "transposed.musicxml"
-        _export_musicxml(new_score, output_xml)
+            output_xml = job.job_dir / f"transposed-{i:03d}.musicxml"
+            _export_musicxml(new_score, output_xml)
+
+            page_pdf = job.job_dir / f"page-{i:03d}.pdf"
+            _render_pool.submit(render.render_score_to_pdf, output_xml, page_pdf).result()
+            page_pdfs.append(page_pdf)
 
         output_pdf = job.job_dir / "output.pdf"
-        _render_pool.submit(render.render_score_to_pdf, output_xml, output_pdf).result()
+        if len(page_pdfs) == 1:
+            page_pdfs[0].replace(output_pdf)
+        else:
+            _merge_pdfs(page_pdfs, output_pdf)
 
         job.output_pdf_path = output_pdf
         job.status = "done"

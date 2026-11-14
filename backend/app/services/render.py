@@ -12,6 +12,9 @@ VEROVIO_OPTIONS = {
     "scale": 40,
     "adjustPageHeight": True,
     "breaks": "auto",
+    # OMR output's title/composer metadata is usually just the source
+    # filename, not real information worth rendering on every page.
+    "header": "none",
 }
 
 
