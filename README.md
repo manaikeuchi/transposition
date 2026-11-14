@@ -37,6 +37,15 @@ npm run dev
 ブラウザで `http://localhost:5173` を開く。Vite の dev サーバーが `/api/*` を
 `http://127.0.0.1:8000` にプロキシする(`frontend/vite.config.ts`)。
 
+venv 作成・`npm install`・Docker イメージビルドを一度済ませていれば、以降は
+
+```bash
+./start.sh   # バックエンド+フロントエンドを起動
+./stop.sh    # 停止
+```
+
+で起動・停止できる。
+
 ## 処理の流れ
 
 1. `POST /api/jobs` にファイルをアップロード → ジョブを作成し、バックグラウンドで
